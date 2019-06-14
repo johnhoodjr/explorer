@@ -2,7 +2,7 @@
 /* eslint-disable no-restricted-globals */
 const API = require('./timeline');
 
-self.onconnect = sharedWorkerInit;
+self.onconnect = sharedWorkerInit; // eslint-disable-line no-restricted-globals
 
 function sharedWorkerInit (e) {
   const port = e.ports[0];

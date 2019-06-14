@@ -10,7 +10,6 @@ import * as Playback from './playback';
 import * as LogIndex from './logIndex';
 import { getDongleID, getZoom } from '../url';
 
-const TimelineSharedWorker = require('./index.sharedworker');
 const TimelineWebWorker = require('./index.worker');
 const LogReaderWorker = require('./logReader');
 
@@ -448,11 +447,7 @@ async function initWorker (timeline) {
     return new Promise(noop);
   }
 
-  if (false && typeof TimelineSharedWorker === 'function') {
-    worker = new TimelineSharedWorker();
-    timeline.isShared = true;
-    timeline.logReader = new LogReaderWorker();
-  } else if (typeof TimelineWebWorker === 'function') {
+  if (typeof TimelineWebWorker === 'function') {
     console.warn('Using web worker fallback');
     worker = new TimelineWebWorker();
     timeline.logReader = new LogReaderWorker();

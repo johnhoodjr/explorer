@@ -1,5 +1,4 @@
 const Event = require('geval/event');
-const LogReaderSharedWorker = require('./logReader.sharedworker');
 const LogReaderWorker = require('./logReader.worker');
 
 const DataEvent = Event();
@@ -14,9 +13,8 @@ function getWorker () {
   if (logReader) {
     return logReader;
   }
-  if (false && typeof LogReaderSharedWorker === 'function' && typeof SharedWorker === 'function') {
-    logReader = new LogReaderSharedWorker();
-  } else if (typeof LogReaderWorker === 'function') {
+
+  if (typeof LogReaderWorker === 'function') {
     console.warn('Using web worker fallback');
     logReader = new LogReaderWorker();
   } else {

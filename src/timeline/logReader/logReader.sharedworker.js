@@ -2,7 +2,7 @@
 /* eslint-disable no-restricted-globals */
 const API = require('./logReader');
 
-self.onconnect = sharedWorkerInit;
+self.onconnect = sharedWorkerInit; // eslint-disable-line no-restricted-globals
 
 function sharedWorkerInit (e) {
   console.log(e.ports);

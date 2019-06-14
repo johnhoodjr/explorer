@@ -8,7 +8,7 @@ const ACTION_RESOLVE_ANNOTATION = 'resolve_annotation';
 
 const SEGMENT_LENGTH = 1000 * 60;
 
-module.exports = {
+export default {
   // helpers
   getCurrentSegment,
   getNextSegment,
@@ -472,13 +472,4 @@ function getCurrentSegment (state, offset) {
     }
   }
   return null;
-}
-
-function cropSelection (state, start, end) {
-  var curSegment = getCurrentSegment(state, start);
-  if (!curSegment) {
-    curSegment = getNextSegment(state, start);
-    start = curSegment.startOffset - 1000; // 1 second before next route
-  }
-  state.range
 }

@@ -1,3 +1,6 @@
+/* eslint-env worker */
+/* eslint-disable no-restricted-globals */
+
 import Event from 'geval/event';
 import CreateStore from 'weakmap-shim/create-store';
 import debounce from 'debounce';

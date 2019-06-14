@@ -2,7 +2,7 @@
 /* eslint-disable no-restricted-globals */
 const API = require('./logReader');
 
-const port = self;
+const port = self; // eslint-disable-line no-restricted-globals
 const portInterface = {
   close: close,
   postMessage: postMessage
@@ -39,7 +39,7 @@ function close () {
 }
 
 function postMessage (msg, transferables) {
-  if (self.window === self) {
+  if (self.window === self) { // eslint-disable-line no-restricted-globals
     port.postMessage(msg, '*', transferables);
   } else {
     port.postMessage(msg, transferables);
