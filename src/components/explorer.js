@@ -1,56 +1,56 @@
 import React, { Component } from 'react';
 import { connect } from 'react-redux';
 import Obstruction from 'obstruction';
+import PropTypes from 'prop-types';
 
 import { withStyles } from '@material-ui/core/styles';
-import Grid from '@material-ui/core/Grid';
-import Typography from '@material-ui/core/Typography';
-import 'mapbox-gl/dist/mapbox-gl.css';
+import 'mapbox-gl/src/css/mapbox-gl.css';
 
 import AppHeader from './AppHeader';
 import Dashboard from './Dashboard';
 import Annotations from './Annotations';
 
 import Timelineworker from '../timeline';
-import { selectRange } from '../actions';
+import { selectRange, selectDevice } from '../actions';
 import { getDongleID, getZoom } from '../url';
 
-const styles = theme => {
-  return {
-    base: {
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-    },
-    header: {
-      display: 'flex',
-      height: 64,
-      minHeight: 64,
-    },
-    window: {
-      display: 'flex',
-      flexGrow: 1,
-      minHeight: 0,
-    },
-  };
-};
+const styles = (/* theme */) => ({
+  base: {
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%',
+  },
+  header: {
+    display: 'flex',
+    height: 64,
+    minHeight: 64,
+  },
+  window: {
+    display: 'flex',
+    flexGrow: 1,
+    minHeight: 0,
+  },
+});
 
 class ExplorerApp extends Component {
-  constructor (props) {
+  constructor(props) {
     super(props);
 
     this.state = {
       settingDongle: null
     };
   }
-  componentWillMount () {
+
+  componentWillMount() {
     this.checkProps(this.props);
   }
-  componentWillReceiveProps (props) {
+
+  componentWillReceiveProps(props) {
     this.checkProps(props);
 
-    var isZoomed = props.expanded;
-    var wasZoomed = this.props.expanded;
+    const isZoomed = props.expanded;
+    const { expanded } = this.props;
+    const wasZoomed = expanded;
 
     if (isZoomed && !wasZoomed) {
       Timelineworker.play();
@@ -59,41 +59,52 @@ class ExplorerApp extends Component {
       Timelineworker.pause();
     }
   }
-  checkProps (props) {
-    var dongleId = getDongleID(props.pathname);
-    var zoom = getZoom(props.pathname);
 
-    let curDongle = this.state.settingDongle || props.dongleId;
+  checkProps(props) {
+    const dongleId = getDongleID(props.pathname);
+    const zoom = getZoom(props.pathname);
+
+    const { settingDongle } = this.state;
+    const curDongle = settingDongle || props.dongleId;
+    const { dispatch } = this.props;
 
     if (dongleId) {
       if (curDongle !== dongleId) {
-        Timelineworker.selectDevice(dongleId);
-        this.setState({
-          settingDongle: dongleId
-        });
+        if (!settingDongle) {
+          Timelineworker.selectDevice(dongleId);
+          this.setState({
+            settingDongle: dongleId
+          });
+        }
       } else {
         this.setState({
           settingDongle: null
         });
       }
     }
-    this.props.dispatch(selectRange(zoom.start, zoom.end));
+    dispatch(selectRange(zoom.start, zoom.end));
   }
 
   render() {
     const { classes, expanded } = this.props;
     return (
-      <div className={ classes.base }>
-        <div className={ classes.header }>
+      <div className={classes.base}>
+        <div className={classes.header}>
           <AppHeader />
         </div>
-        <div className={ classes.window }>
+        <div className={classes.window}>
           { expanded ? (<Annotations />) : (<Dashboard />) }
         </div>
       </div>
     );
   }
 }
+
+ExplorerApp.propTypes = {
+  expanded: PropTypes.bool.isRequired,
+  dispatch: PropTypes.func.isRequired,
+  classes: PropTypes.object.isRequired
+};
 
 const stateToProps = Obstruction({
   expanded: 'zoom.expanded',

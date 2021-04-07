@@ -1,5 +1,4 @@
 import LogStream from '@commaai/log_reader';
-import toJSON from '@commaai/capnp-json';
 import { raw as RawApi, request as Request } from '@commaai/comma-api';
 import Auth from '@commaai/my-comma-auth';
 
@@ -11,6 +10,7 @@ import * as capnp from 'capnp-ts';
 import { Event as CapnpEvent } from '@commaai/log_reader/capnp/log.capnp';
 import filterWhich from './allowedEventTypes';
 import * as Demo from '../../demo';
+
 const demoLogUrls = require('../../demo/logUrls.json');
 
 // cache all of the data
@@ -24,12 +24,12 @@ const ExpireEvent = Event();
 export const onExpire = ExpireEvent.listen;
 
 class CacheEntry {
-  constructor (route, segment, dataListener) {
+  constructor(route, segment, dataListener) {
     this.route = route;
     this.segment = segment;
     this.expire = this.expire.bind(this);
     this.dataListener = dataListener;
-    this.authInitPromise = Auth.init().then(function(token) {
+    this.authInitPromise = Promise.all([Auth.init(), Demo.init()]).then(([token]) => {
       Request.configure(token);
     });
 
@@ -38,20 +38,22 @@ class CacheEntry {
     this.log = [];
     this.queue = [];
     this.logEvent = Event();
-    this.logEvent.listen((e) => this.log = this.log.concat(e));
-    var sendLogs = debounce(() => {
+    this.logEvent.listen((e) => {
+      this.log = this.log.concat(e);
+    });
+    const sendLogs = debounce(() => {
       if (!this.queue.length) {
         return;
       }
-      var queue = this.queue;
+      const { queue } = this;
       this.queue = [];
       this.logEvent.broadcast(queue);
     });
     this.getLogStream().then((loader) => {
       loader((buf) => {
-        let msg = new capnp.Message(buf, false);
-        let event = msg.getRoot(CapnpEvent);
-        let which = event.which();
+        const msg = new capnp.Message(buf, false);
+        const event = msg.getRoot(CapnpEvent);
+        const which = event.which();
         if (!filterWhich(which)) {
           // don't send event to main thread
           return;
@@ -62,43 +64,50 @@ class CacheEntry {
     });
   }
 
-  getLog (callback) {
+  getLog(callback) {
     if (this.log.length) {
       callback(this.log);
     }
   }
 
-  subscribe (callback) {
+  subscribe(callback) {
     return this.logEvent.listen(callback);
   }
 
-  start () {
+  start() {
     if (this.started) {
       return;
     }
-    Demo.init().then(() => {
-      this.started = true;
+    this.started = true;
+
+    this.authInitPromise.then(() => {
       this.getLog(this.dataListener);
       this.unlisten = this.subscribe(this.dataListener);
     });
   }
 
-  async getLogUrl () {
+  async getLogUrl() {
     await this.authInitPromise;
-    var urls;
+    let urls;
     if (Demo.isDemo()) {
-      urls = demoLogUrls[this.route];
+      return demoLogUrls[this.route][this.segment];
     } else {
-      urls = await RawApi.getLogUrls(this.route);
+      urls = await RawApi.getRouteFiles(this.route);
+      if (urls.logs[this.segment] !== undefined) {
+        return urls.logs[this.segment];
+      } else {
+        return urls.qlogs[this.segment];
+      }
     }
-    return urls[this.segment];
   }
 
-  async getLogStream () {
-    return new Promise(async (resolve, reject) => {
-      request(await this.getLogUrl(), (err, res) => {
+  async getLogStream() {
+    const logUrl = await this.getLogUrl();
+    return new Promise((resolve, reject) => {
+      request(logUrl, (err, res) => {
         if (err) {
-          return reject(err);
+          reject(err);
+          return;
         }
         // res.on('end', () => {
         // });
@@ -109,7 +118,7 @@ class CacheEntry {
     });
   }
 
-  touch () {
+  touch() {
     if (this.expireTimer) {
       this.expireTimer();
       this.expireTimer = null;
@@ -120,7 +129,7 @@ class CacheEntry {
     return this;
   }
 
-  expire () {
+  expire() {
     // expire out of the cache
     if (this.unlisten) {
       this.unlisten();
@@ -134,7 +143,7 @@ class CacheEntry {
   }
 }
 
-export function getEntry (route, segment, dataListener) {
+export function getEntry(route, segment, dataListener) {
   if (CacheStore[route] && CacheStore[route][segment]) {
     return CacheStore[route][segment].touch();
   }
@@ -143,13 +152,13 @@ export function getEntry (route, segment, dataListener) {
     CacheStore[route] = {};
   }
 
-  CacheStore[route][segment] = new CacheEntry(route, segment, function (data) {
+  CacheStore[route][segment] = new CacheEntry(route, segment, ((data) => {
     if (dataListener) {
       dataListener({
         route, segment, data
       });
     }
-  });
+  }));
 
   return CacheStore[route][segment];
 }

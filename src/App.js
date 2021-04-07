@@ -6,6 +6,8 @@ import { timeout } from 'thyming';
 import document from 'global/document';
 import qs from 'query-string';
 import localforage from 'localforage';
+import Jepsen from 'carly';
+import Collector from 'collect-methods';
 
 import CircularProgress from '@material-ui/core/CircularProgress';
 import Grid from '@material-ui/core/Grid';
@@ -26,12 +28,12 @@ import * as Demo from './demo';
 initGoogleAnalytics(history);
 const store = createStore();
 
-TimelineWorker.onStateChange(function (data) {
+TimelineWorker.onStateChange((data) => {
   store.dispatch(updateState(data));
 });
 
 class App extends Component {
-  constructor (props) {
+  constructor(props) {
     super(props);
 
     this.state = {
@@ -39,30 +41,56 @@ class App extends Component {
       demo: false,
     };
 
-    Demo.init().then((isDemo) => {
+    this.cancelInit = Collector();
+
+    const initDemoTimeline = Jepsen(() => {
+      TimelineWorker.init(true).then(initDemoState.callback);
+    });
+
+    const checkDemo = Jepsen((isDemo) => {
       if (isDemo) {
         return localforage.setItem('isDemo', '1')
-          .then(TimelineWorker.init(isDemo).then(
-            () => {
-              TimelineWorker.selectTimeRange(1564443025000, Date.now());
-              this.setState({
-                initialized: true,
-                demo: true,
-              })
-            })
-          );
-      } else {
-        return this.auth();
+          .then(initDemoTimeline.callback);
       }
+      return this.auth();
     });
-  }
-  async auth () {
-    if (document.location) {
-      if (document.location.pathname == '/auth/g/redirect') {
-        var code = qs.parse(document.location.search)['code'];
 
+    const initDemoState = Jepsen(() => {
+      TimelineWorker.selectTimeRange(1564443025000, Date.now());
+      this.setState({
+        initialized: true,
+        demo: true,
+      });
+    });
+
+    this.cancelInit(checkDemo.cancel);
+    this.cancelInit(initDemoTimeline.cancel);
+    this.cancelInit(initDemoState.cancel);
+
+    Demo.init().then(checkDemo.callback);
+  }
+
+  componentWillUnmount() {
+    this.cancelInit();
+    TimelineWorker.stop();
+  }
+
+  async auth() {
+    if (document.location) {
+      if (document.location.pathname == AuthConfig.GOOGLE_REDIRECT_PATH ||
+          document.location.pathname == AuthConfig.APPLE_REDIRECT_PATH ||
+          document.location.pathname == AuthConfig.GITHUB_REDIRECT_PATH)
+        {
+        const { code } = qs.parse(document.location.search);
         try {
-          const token = await AuthApi.refreshAccessToken(code, AuthConfig.REDIRECT_URI);
+          let token = null;
+          if (document.location.pathname == AuthConfig.GOOGLE_REDIRECT_PATH) {
+            token = await AuthApi.refreshAccessToken(code, AuthConfig.GOOGLE_REDIRECT_URI, 'google');
+          } else if (document.location.pathname == AuthConfig.APPLE_REDIRECT_PATH) {
+            token = await AuthApi.refreshAccessToken(code, AuthConfig.APPLE_REDIRECT_URI, 'apple');
+          } else if (document.location.pathname == AuthConfig.GITHUB_REDIRECT_PATH) {
+            token = await AuthApi.refreshAccessToken(code, AuthConfig.GItHUB_REDIRECT_URI, 'github');
+          }
           if (token) {
             AuthStorage.setCommaAccessToken(token);
           }
@@ -82,45 +110,50 @@ class App extends Component {
 
     this.setState({ initialized: true });
   }
-  redirectLink () {
+
+  redirectLink() {
     let url = '/';
     if (typeof window.sessionStorage !== 'undefined') {
       url = sessionStorage.redirectURL || '/';
     }
     return url;
   }
-  authRoutes () {
+
+  authRoutes() {
     return (
       <Switch>
-        <Route path="/auth/" render={ () => <Redirect to={ this.redirectLink() } /> } />
-        <Route path="/" component={ Explorer } />
+        <Route path="/auth/" render={() => <Redirect to={this.redirectLink()} />} />
+        <Route path="/" component={Explorer} />
       </Switch>
     );
   }
-  ananymousRoutes () {
+
+  ananymousRoutes() {
     return (
       <Switch>
-        <Route path="/auth/" render={ () => <Redirect to="/" /> } />
-        <Route path="/" component={ AnonymousLanding } />
+        <Route path="/auth/" render={() => <Redirect to="/" />} />
+        <Route path="/" component={AnonymousLanding} />
       </Switch>
     );
   }
-  renderLoading () {
+
+  renderLoading() {
     return (
-      <Grid container alignItems='center' style={{ width: '100%', height: '100%' }}>
-        <Grid item align='center' xs={12} >
-          <CircularProgress size='10vh' style={{ color: '#525E66' }} />
+      <Grid container alignItems="center" style={{ width: '100%', height: '100%' }}>
+        <Grid item align="center" xs={12}>
+          <CircularProgress size="10vh" style={{ color: '#525E66' }} />
         </Grid>
       </Grid>
     );
   }
+
   render() {
     if (!this.state.initialized) {
       return this.renderLoading();
     }
     return (
-      <Provider store={ store }>
-        <ConnectedRouter history={ history }>
+      <Provider store={store}>
+        <ConnectedRouter history={history}>
           { (MyCommaAuth.isAuthenticated() || this.state.demo) ? this.authRoutes() : this.ananymousRoutes() }
         </ConnectedRouter>
       </Provider>

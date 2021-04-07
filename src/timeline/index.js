@@ -1,232 +1,198 @@
-import qs from 'query-string';
+/* eslint-disable class-methods-use-this */
 import window from 'global/window';
 import Event from 'geval/event';
-import { partial } from 'ap';
 import * as capnp from 'capnp-ts';
-import { Event as CapnpEvent, Event_Which } from '@commaai/log_reader/capnp/log.capnp';
+import { Event as CapnpEvent, Event_Which as EventWhich } from '@commaai/log_reader/capnp/log.capnp';
 import toJSON from '@commaai/capnp-json';
 
 import { storage as AuthStorage } from '@commaai/my-comma-auth';
 import * as Playback from './playback';
 import * as LogIndex from './logIndex';
+import * as Cache from './cache';
 import { getDongleID, getZoom } from '../url';
-import { isDemo } from '../demo';
+import { getState, init as initTimeline } from './timeline';
+import { commands } from './commands';
+import store from './store';
 
-const TimelineSharedWorker = require('./index.sharedworker');
-const TimelineWebWorker = require('./index.worker');
 const LogReaderWorker = require('./logReader');
 
 const UnloadEvent = Event();
 const StateEvent = Event();
 const IndexEvent = Event();
 const InitEvent = Event();
-const InitPromise = new Promise(function (resolve, reject) {
+const InitPromise = new Promise(((resolve) => {
   InitEvent.listen(resolve);
-});
+}));
 
 window.addEventListener('beforeunload', UnloadEvent.broadcast);
-var startPath = window.location ? window.location.pathname : '';
+const startPath = window.location ? window.location.pathname : '';
 
-class TimelineInterface {
-  constructor (options) {
+// helper functions
+
+export class TimelineInterface {
+  constructor(options) {
     this.options = options || {};
     this.buffers = {};
     this.requestId = 1;
     this.openRequests = {};
-    this._initPromise = InitPromise;
-    this._readyPromise = this.rpc({
-      command: 'hello',
-      data: {
-        dongleId: getDongleID(startPath),
-        zoom: getZoom(startPath),
-      }
-    });
+    this.initPromise = InitPromise;
+
+    this.expire = this.expire.bind(this);
   }
 
   onStateChange = StateEvent.listen
+
   onIndexed = IndexEvent.listen
 
-  async init (isDemo) {
+  async init(isDemo) {
     if (!this.hasInit) {
       this.hasInit = true;
       this.isDemo = isDemo;
-      init(this, this.isDemo);
+
+      initTimeline();
+
+      this.readyPromise = commands.hello({
+        dongleId: getDongleID(startPath),
+        zoom: getZoom(startPath),
+      });
+
+      const token = await AuthStorage.getCommaAccessToken();
+      if (!(token || isDemo)) {
+        return new Promise((resolve, reject) => reject(Error('No auth')));
+      }
+
+      // if (false && typeof TimelineSharedWorker === 'function') {
+      //   worker = new TimelineSharedWorker();
+      //   t.isShared = true;
+      //   t.logReader = new LogReaderWorker();
+      if (typeof LogReaderWorker === 'function') {
+        this.logReader = new LogReaderWorker();
+      }
+
+      // broadcast message
+      // handle message
+      // cache port
+      commands.cachePort(null, [this.logReader.port || this.logReader]);
+
+      LogReaderWorker.onData((msg) => {
+        this.handleData(msg);
+      });
+
+      UnloadEvent.listen(() => this.disconnect());
+      Cache.onExpire(this.expire);
+      this.setState(getState());
+      store.subscribe(() => {
+        const state = store.getState();
+        this.setState(state);
+      });
+
+      InitEvent.broadcast(token);
     }
-    return this._readyPromise;
+    return this.readyPromise;
   }
 
-  async getPort () {
-    await this._initPromise;
+  async stop() {
+    if (!this.hasInit) {
+      return;
+    }
+    await commands.stop();
+    this.hasInit = false;
+    if (this.logReader) {
+      this.logReader = null;
+    }
+  }
+
+  async getPort() {
+    await this.initPromise;
     return this.port;
   }
 
-  async getValue () {
-    return this.postMessage({
-      foo: 'bar'
-    });
+  async disconnect() {
+    return commands.close();
   }
 
-  async disconnect () {
-    return this.postMessage({
-      command: 'close'
-    });
+  async seek(offset) {
+    return commands.seek(Math.round(offset));
   }
 
-  async seek (offset) {
-    return this.postMessage({
-      command: 'seek',
-      data: Math.round(offset)
-    });
+  async play(speed = 1) {
+    return commands.play(speed);
   }
 
-  async play (speed = 1) {
-    return this.postMessage({
-      command: 'play',
-      data: speed
-    });
+  async pause() {
+    return commands.pause();
   }
 
-  async pause () {
-    return this.postMessage({
-      command: 'pause'
-    });
+  async disableBuffer() {
+    return commands.disableBuffer(true);
   }
 
-  async selectTimeRange (start, end) {
-    return this.postMessage({
-      command: 'selectTimeRange',
-      data: {
-        start, end
-      }
-    });
+  async bufferVideo(isBuffering = true) {
+    return commands.bufferVideo(isBuffering);
   }
 
-  async selectLoop (startTime, duration) {
-    return this.postMessage({
-      command: 'selectLoop',
-      data: {
-        startTime, duration
-      }
-    });
+  async bufferData(isBuffering = true) {
+    return commands.bufferData(isBuffering);
   }
 
-  async selectDevice (dongleId) {
-    await this._readyPromise;
+  async selectTimeRange(start, end) {
+    return commands.selectTimeRange({ start, end });
+  }
+
+  async selectLoop(startTime, duration) {
+    return commands.selectLoop({ startTime, duration });
+  }
+
+  async selectDevice(dongleId) {
+    await this.readyPromise;
     if (this.state.dongleId === dongleId) {
-      return;
+      return true;
     }
-    return this.postMessage({
-      command: 'selectDevice',
-      data: dongleId
-    });
+    return commands.selectDevice(dongleId);
   }
 
-  async resolveAnnotation (annotation, event, route) {
-    return this.postMessage({
-      command: 'resolve',
-      data: { annotation, event, route }
-    });
+  async resolveAnnotation(annotation, event, route) {
+    return commands.resolve({ annotation, event, route });
   }
 
-  async updateDevice (device) {
-    return this.postMessage({
-      command: 'updateDevice',
-      data: device,
-    });
+  async updateDevice(device) {
+    return commands.updateDevice(device,);
   }
 
-  async rpc (msg) {
-    // msg that expects a reply
-    return new Promise((resolve, reject) => {
-      let requestId = this.requestId++;
-      this.openRequests[requestId] = resolve;
-      this.postMessage({
-        ...msg,
-        requestId
-      });
-    });
-  }
-
-  async postMessage (msg) {
-    var port = await this.getPort();
-    port.postMessage(msg);
-  }
-
-  async handleMessage (msg) {
-    if (this.handleCommand(msg)) {
-      return;
-    }
-    console.log('Unknown message!', msg.data);
-  }
-  handleCommand (msg) {
-    if (!msg.data.command) {
-      return false;
-    }
-    switch (msg.data.command) {
-      case 'expire':
-        // cached segment is expiring because we haven't watched it in a while...
-        console.log('Expiring cache entry', msg.data);
-        if (this.buffers[msg.data.route] && this.buffers[msg.data.route][msg.data.segment]) {
-          delete this.buffers[msg.data.route][msg.data.segment];
-        }
-        break;
-      case 'data':
-        // log data stream
-        this.handleData(msg);
-        break;
-      case 'return-value':
-        // implement RPC return values
-        // is this needed?
-        if (this.openRequests[msg.data.requestId]) {
-          this.openRequests[msg.data.requestId](msg.data.data);
-          delete this.openRequests[msg.data.requestId];
-        } else {
-          console.error('Got a reply for invalid RPC', msg.data.requestId);
-        }
-        break;
-      case 'state':
-        this.state = msg.data.data;
-        StateEvent.broadcast(msg.data.data);
-        if (this.logReader) {
-          let port = this.logReader.port || this.logReader;
-          if (this.state.route) {
-            port.postMessage({
-              command: 'touch',
-              data: {
-                route: this.state.route,
-                segment: this.state.segment,
-              }
-            });
+  setState(state) {
+    this.state = state;
+    StateEvent.broadcast(state);
+    if (this.logReader) {
+      const port = this.logReader.port || this.logReader;
+      if (this.state.route) {
+        port.postMessage({
+          command: 'touch',
+          data: {
+            route: this.state.route,
+            segment: this.state.segment,
           }
-          if (this.state.nextSegment) {
-            port.postMessage({
-              command: 'touch',
-              data: {
-                route: this.state.nextSegment.route,
-                segment: this.state.nextSegment.segment,
-              }
-            });
+        });
+      }
+      if (this.state.nextSegment) {
+        port.postMessage({
+          command: 'touch',
+          data: {
+            route: this.state.nextSegment.route,
+            segment: this.state.nextSegment.segment,
           }
-        }
-        break;
-      case 'broadcastPort':
-        // set up dedicated broadcast channel
-        this.broadcastPort = msg.ports[0];
-        this.broadcastPort.onmessage = this.handleBroadcast.bind(this);
-        this.broadcastPort.onmessageerror = console.error.bind(console);
-        break;
-      default:
-        return false;
+        });
+      }
     }
-    return true;
   }
-  async handleBroadcast (msg) {
-    if (this.handleCommand(msg)) {
-      return;
+
+  expire(data) {
+    console.log('Expiring cache entry', data);
+    if (this.buffers[data.route] && this.buffers[data.route][data.segment]) {
+      delete this.buffers[data.route][data.segment];
     }
-    console.log('Unknown message!', msg.data);
   }
-  async handleData (msg) {
+
+  async handleData(msg) {
     if (!this.buffers[msg.data.route]) {
       this.buffers[msg.data.route] = {};
     }
@@ -237,13 +203,17 @@ class TimelineInterface {
     }
     IndexEvent.broadcast(msg.data.route);
   }
-  getStartMonoTime (route, segment = 0) {
-    if (!this.buffers[route] || !this.buffers[route][segment] || !this.buffers[route][segment].index) {
+
+  getStartMonoTime(route, segment = 0) {
+    if (!this.buffers[route]
+      || !this.buffers[route][segment]
+      || !this.buffers[route][segment].index) {
       return 0;
     }
     return this.buffers[route][segment].index[0][0];
   }
-  getIndex () {
+
+  getIndex() {
     if (!this.state || !this.state.route) {
       return [];
     }
@@ -253,233 +223,228 @@ class TimelineInterface {
 
     return this.buffers[this.state.route][this.state.segment].index;
   }
-  currentLogMonoTime () {
+
+  currentLogMonoTime() {
     if (!this.state || !this.state.route) {
       return null;
     }
     if (!this.buffers[this.state.route] || !this.buffers[this.state.route][this.state.segment]) {
       return null;
     }
-    var offset = this.currentOffset();
-    var segment = this.state.segments.filter((a) => a.route === this.state.route);
-    var logIndex = this.buffers[this.state.route][this.state.segment];
-    segment = segment[0];
+    let offset = this.currentOffset();
+    const [segment] = this.state.segments.filter((a) => a.route === this.state.route);
+    const logIndex = this.buffers[this.state.route][this.state.segment];
     if (!segment) {
       return null;
     }
     offset -= segment.offset;
-    var startTime = logIndex.index[0][0];
+    const startTime = logIndex.index[0][0];
 
     return offset + startTime;
   }
-  lastEvents (eventCount = 10) {
-    var logMonoTime = this.currentLogMonoTime();
+
+  lastEvents(_eventCount = 10) {
+    const logMonoTime = this.currentLogMonoTime();
     if (!logMonoTime) {
       return [];
     }
-    var logIndex = this.buffers[this.state.route][this.state.segment];
+    const logIndex = this.getLogIndex();
 
-    var curIndex = LogIndex.findMonoTime(logIndex, logMonoTime);
-    eventCount = Math.min(eventCount, curIndex);
+    const curIndex = LogIndex.findMonoTime(logIndex, logMonoTime);
+    const eventCount = Math.min(_eventCount, curIndex);
 
-    return [...Array(eventCount)].map((u, i) => {
-      // millis, nanos, offset, len, buffer
-      var entry = logIndex.index[curIndex - i];
-      var buffer = logIndex.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
-      var msg = new capnp.Message(buffer, false);
-      var event = msg.getRoot(CapnpEvent);
-      return toJSON(event);
-    });
+    return [...Array(eventCount)].map((u, i) => this.getEvent(curIndex - i, logIndex));
   }
-  currentOffset () {
+
+  getLogIndex() {
+    return this.buffers[this.state.route]
+      ? this.buffers[this.state.route][this.state.segment]
+      : null;
+  }
+
+  getNextLogIndex() {
+    if (!this.state.nextSegment) {
+      return null;
+    }
+    return this.buffers[this.state.nextSegment.route]
+      ? this.buffers[this.state.nextSegment.route][this.state.nextSegment.segment]
+      : null;
+  }
+
+  getEvent(index, _logIndex) {
+    // millis, nanos, offset, len, buffer
+    const logIndex = _logIndex || this.buffers[this.state.route][this.state.segment];
+    if (index < 0 || index >= logIndex.index.length) {
+      // console.log('Invalid event index', index);
+      return null;
+    }
+    const entry = logIndex.index[index];
+    const buffer = logIndex.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
+    const msg = new capnp.Message(buffer, false);
+    const event = msg.getRoot(CapnpEvent);
+    return toJSON(event);
+  }
+
+  currentOffset() {
     if (this.state) {
       return Playback.currentOffset(this.state);
-    } else {
-      return 0;
     }
+    return 0;
   }
-  timestampToOffset (timestamp) {
+
+  timestampToOffset(timestamp) {
     if (this.state) {
       return Playback.timestampToOffset(this.state, timestamp);
-    } else {
-      return 0;
     }
+    return 0;
   }
-  currentInitData () {
+
+  firstFrameTime() {
     if (!this.state || !this.state.route) {
-      return;
+      return null;
     }
-    if (!this.buffers[this.state.route] || !this.buffers[this.state.route][this.state.segment]) {
-      return;
+    if (!this.buffers[this.state.route] || !this.buffers[this.state.route][0]) {
+      return null;
     }
 
-    var segment = this.state.segments.filter((a) => a.route === this.state.route);
-    segment = segment[0];
+    const logIndex = this.buffers[this.state.route][0];
+    for(let i = 0; i < logIndex.index.length; i++) {
+      const entry = logIndex.index[i];
+      if (entry[5] === EventWhich.FRAME) {
+        const buffer = logIndex.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
+        const msg = new capnp.Message(buffer, false);
+        const event = toJSON(msg.getRoot(CapnpEvent));
+        return event.Frame.TimestampEof / 1e9;
+      }
+    }
+    return null;
+  }
+
+  currentInitData() {
+    if (!this.state || !this.state.route) {
+      return null;
+    }
+    if (!this.buffers[this.state.route] || !this.buffers[this.state.route][this.state.segment]) {
+      return null;
+    }
+
+    const [segment] = this.state.segments.filter((a) => a.route === this.state.route);
     if (!segment) {
-      return;
+      return null;
     }
 
     // check if any buffered logs have the initdata packet
-    var curSegLog = this.buffers[this.state.route][this.state.segment];
-    var entry = curSegLog.index[0];
-    if (entry[5] !== Event_Which.INIT_DATA) {
-      return;
+    const curSegLog = this.buffers[this.state.route][this.state.segment];
+    const entry = curSegLog.index[0];
+    if (entry[5] !== EventWhich.INIT_DATA) {
+      return null;
     }
 
-    let buffer = curSegLog.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
-    var msg = new capnp.Message(buffer, false);
-    var event = msg.getRoot(CapnpEvent);
+    const buffer = curSegLog.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
+    const msg = new capnp.Message(buffer, false);
+    const event = msg.getRoot(CapnpEvent);
+    return toJSON(event);
+  }
 
-    var initData = toJSON(event);
-    // Cast params key-value pointers to Text, as capnp-ts does not yet
-    // apply parameterized struct types like we use for
-    // params: Map(Text, Text)
-    initData = Object.create(initData);
-    Object.defineProperty(initData, 'InitData', {writable: true, value: Object.create(initData.InitData)});
-    Object.defineProperty(initData.InitData, 'Params', {writable: true, value: Object.create(initData.InitData.Params)});
-    var parsedEntries = initData.InitData.Params.Entries.map((entry) => {
-      entry = Object.create(entry);
-      Object.defineProperty(entry, 'Key', {
-        writable: false,
-        value: capnp.Text.fromPointer(entry.Key).get()
-      });
-      Object.defineProperty(entry, 'Value', {
-        writable: true,
-        value: capnp.Text.fromPointer(entry.Value).get()
-      })
+  currentModel() {
+    return this.getEventByType(EventWhich.MODEL, 1000);
+  }
 
-      return entry;
-    });
-    Object.defineProperty(initData.InitData.Params, 'Entries', {writable: true, value: parsedEntries});
+  currentModelV2() {
+    return this.getEventByType(EventWhich.MODEL_V2, 1000);
+  }
 
-    return initData;
+  currentRadarState() {
+    return this.getEventByType(EventWhich.RADAR_STATE, 1000);
   }
-  currentModel () {
-    return this.getEventByType(Event_Which.MODEL, 1000);
+
+  currentMPC() {
+    return this.getEventByType(EventWhich.LIVE_MPC, 1000);
   }
-  currentLive20 () {
-    return this.getEventByType(Event_Which.LIVE20, 1000);
+
+  currentCarState() {
+    return this.getEventByType(EventWhich.CAR_STATE, 1000);
   }
-  currentLive100 () {
-    return this.getEventByType(Event_Which.LIVE100, 1000);
+
+  currentControlsState() {
+    return this.getEventByType(EventWhich.CONTROLS_STATE);
   }
-  currentLiveMapData () {
-    return this.getEventByType(Event_Which.LIVE_MAP_DATA, 4000);
+
+  currentDriverMonitoring() {
+    return this.getEventByType(EventWhich.DRIVER_MONITORING, 1000);
   }
-  currentMPC () {
-    return this.getEventByType(Event_Which.LIVE_MPC, 1000);
+
+  currentThumbnail() {
+    return this.getEventByType(EventWhich.THUMBNAIL, 6000);
   }
-  currentCarState () {
-    return this.getEventByType(Event_Which.CAR_STATE, 1000);
+
+  currentLiveCalibration() {
+    return this.getEventByType(EventWhich.LIVE_CALIBRATION, 1000);
   }
-  getEventByType (which, maxTimeDiff = -1) {
+
+  getEventByType(which, maxTimeDiff = -1) {
     if (!this.state || !this.state.route) {
-      return;
+      return null;
     }
     if (!this.buffers[this.state.route] || !this.buffers[this.state.route][this.state.segment]) {
-      return;
+      return null;
     }
-    var monoTime = this.currentLogMonoTime()
-    var offset = this.currentOffset();
-    var segment = this.state.segments.filter((a) => a.route === this.state.route);
-    segment = segment[0];
+    const monoTime = this.currentLogMonoTime();
+    let offset = this.currentOffset();
+    const [segment] = this.state.segments.filter((a) => a.route === this.state.route);
     if (!segment) {
-      return;
+      return null;
     }
 
     for (let curSegNum = this.state.segment; curSegNum >= 0; --curSegNum) {
-      var logIndex = this.buffers[this.state.route][curSegNum];
+      const logIndex = this.buffers[this.state.route][curSegNum];
       if (!logIndex) {
-        return;
+        return null;
       }
       offset -= segment.offset;
-      var startTime = logIndex.index[0][0];
-      var logMonoTime = offset + startTime;
-      var curIndex = logIndex.index.length - 1;
+      const startTime = logIndex.index[0][0];
+      const logMonoTime = offset + startTime;
+      let curIndex = logIndex.index.length - 1;
       if (curSegNum === this.state.segment) {
         curIndex = LogIndex.findMonoTime(logIndex, logMonoTime);
       }
 
       for (curIndex; curIndex >= 0; --curIndex) {
-        let entry = logIndex.index[curIndex];
+        const entry = logIndex.index[curIndex];
         if (maxTimeDiff !== -1 && monoTime - entry[0] > maxTimeDiff) {
-          return;
+          return null;
         }
         if (entry[5] === which) {
-          let buffer = logIndex.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
-          var msg = new capnp.Message(buffer, false);
-          var event = msg.getRoot(CapnpEvent);
+          const buffer = logIndex.buffers[entry[4]].slice(entry[2], entry[2] + entry[3]);
+          const msg = new capnp.Message(buffer, false);
+          const event = msg.getRoot(CapnpEvent);
           return toJSON(event);
         }
       }
     }
+
+    return null;
   }
-  getCalibration (route) {
+
+  getCalibration() {
     if (!this.state || !this.state.route) {
-      return;
+      return null;
     }
-    var indexes = this.buffers[this.state.route];
+    const indexes = this.buffers[this.state.route];
 
     if (!indexes) {
-      return;
+      return null;
     }
 
     for (let i = 0, keys = Object.keys(indexes), len = keys.length; i < len; ++i) {
-      let index = indexes[keys[i]];
+      const index = indexes[keys[i]];
       if (index.calibrations && index.calibrations.length) {
         return index.calibrations[index.calibrations.length - 1];
       }
     }
+    return null;
   }
 }
 // create instance and expose it
-var timeline = new TimelineInterface();
+const timeline = new TimelineInterface();
 export default timeline;
-
-// helper functions
-
-async function init (timeline, isDemo) {
-  await initWorker(timeline, isDemo);
-}
-
-async function initWorker (timeline, isDemo) {
-  var worker = null;
-  var logReader = null;
-
-  var token = await AuthStorage.getCommaAccessToken();
-  if ( !(token || isDemo) ) {
-    return new Promise(noop);
-  }
-
-  if (false && typeof TimelineSharedWorker === 'function') {
-    worker = new TimelineSharedWorker();
-    timeline.isShared = true;
-    timeline.logReader = new LogReaderWorker();
-  } else if (typeof TimelineWebWorker === 'function') {
-    console.warn('Using web worker fallback');
-    worker = new TimelineWebWorker();
-    timeline.logReader = new LogReaderWorker();
-  } else {
-    console.warn('Using fake web workers, this is probably a node/test environment');
-    worker = { port: { postMessage: noop } };
-  }
-  var port = worker.port || worker;
-
-  port.onmessage = timeline.handleMessage.bind(timeline);
-
-  timeline.worker = worker;
-  timeline.port = port;
-
-  LogReaderWorker.onData(function (msg) {
-    timeline.handleData(msg);
-  });
-  if (timeline.logReader) {
-    port.postMessage({
-      command: 'cachePort'
-    }, [timeline.logReader.port || timeline.logReader]);
-  }
-  UnloadEvent.listen(() => timeline.disconnect());
-  InitEvent.broadcast(token);
-}
-
-function noop () { }
